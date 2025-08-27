@@ -25,7 +25,7 @@ const CLASSES = [
     basePrice: 1000, // in pence (i.e., £10.00)
     capacity: 16,
     emoji: "🥊",
-    paymentLink: "", // e.g. "https://buy.stripe.com/test_7sY6oHcEy31h9Uj8udeEo00"
+    paymentLink: "", // e.g. "https://buy.stripe.com/test_3cIcN58oibxN3vVaCleEo01"
   },
   {
     id: "sparring",
