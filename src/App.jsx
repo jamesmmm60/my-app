@@ -10,6 +10,7 @@ import {
   ChevronRight,
   Info,
 } from "lucide-react";
+import { loadStripe } from "@stripe/stripe-js"; // ✅ add stripe-js
 import "./App.css";
 
 // ------- Configurable: classes, prices, payment links -------
@@ -25,7 +26,7 @@ const CLASSES = [
     basePrice: 1000, // in pence (i.e., £10.00)
     capacity: 16,
     emoji: "🥊",
-    paymentLink: "", // e.g. "https://buy.stripe.com/test_3cIcN58oibxN3vVaCleEo01"
+    paymentLink: "", // e.g. "https://buy.stripe.com/test_..."
   },
   {
     id: "sparring",
@@ -82,6 +83,9 @@ function useUpcomingDays(days = 14) {
 // Basic timeslots per day
 const TIME_SLOTS = ["06:30", "07:30", "09:00", "12:30", "17:30", "18:30", "19:30"];
 
+// ✅ Load Stripe once (publishable key from Vite env)
+const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY);
+
 export default function App() {
   // Stepper
   const [step, setStep] = useState(1);
@@ -133,8 +137,23 @@ export default function App() {
     }
   }, [dateISO]);
 
-  const success = new URLSearchParams(window.location.search).get("success");
-  const demo = new URLSearchParams(window.location.search).get("demo");
+  const urlParams = new URLSearchParams(window.location.search);
+  const success = urlParams.get("success");
+  const demo = urlParams.get("demo");
+
+  // ✅ Centralized redirect helper: handles session.url or sessionId
+  async function redirectToStripe({ url, sessionId }) {
+    if (url) {
+      window.location.href = url;
+      return;
+    }
+    if (sessionId) {
+      const stripe = await stripePromise;
+      await stripe.redirectToCheckout({ sessionId });
+      return;
+    }
+    throw new Error("No Checkout URL or sessionId returned");
+  }
 
   async function handlePay() {
     if (!name || !email) {
@@ -144,7 +163,7 @@ export default function App() {
     setBanner("");
     setLoading(true);
 
-    // 1) Try server endpoint first (recommended Stripe Checkout)
+    // 1) Server endpoint (recommended)
     try {
       const res = await fetch("/api/create-checkout-session", {
         method: "POST",
@@ -161,26 +180,32 @@ export default function App() {
           notes,
           unit_amount: classPrice, // pence
           currency: CURRENCY.toLowerCase(),
+          promo: promo?.trim(),
+          firstVisit,
         }),
       });
+
       if (res.ok) {
         const data = await res.json();
-        if (data?.url) {
-          window.location.href = data.url; // redirect to Stripe Checkout
-          return;
-        }
+        // Accept either {url} or {id/sessionId}
+        await redirectToStripe({
+          url: data.url,
+          sessionId: data.id || data.sessionId,
+        });
+        return; // redirected
       }
-    } catch {}
+    } catch (err) {
+      console.warn("Backend checkout failed, trying fallbacks…", err);
+    }
 
-    // 2) Fallback: Payment Link per class (no server required)
+    // 2) Payment Link fallback
     if (selectedClass.paymentLink) {
-      window.open(selectedClass.paymentLink, "_blank");
-      setBanner("Opened Stripe Payment Link in a new tab. After paying, return here.");
+      window.location.href = selectedClass.paymentLink;
       setLoading(false);
       return;
     }
 
-    // 3) Final fallback: Demo simulation
+    // 3) Demo simulator
     if (demo !== null) {
       await new Promise((r) => setTimeout(r, 900));
       const params = new URLSearchParams(window.location.search);
@@ -256,6 +281,7 @@ export default function App() {
         </div>
       </header>
 
+        {/* MAIN */}
       <main className="container pad">
         {/* Banner */}
         {banner && (
@@ -453,12 +479,11 @@ export default function App() {
 }
 
 /* =============================================================
-   SERVER_SNIPPET — Minimal Node/Express for Stripe Checkout
+   SERVER_SNIPPET — Minimal Node/Express for Stripe Checkout (TEST MODE)
    Save as server.js, then:
      npm i express stripe cors dotenv
-     STRIPE_SECRET_KEY=sk_test_... node server.js
-   Or create a .env with STRIPE_SECRET_KEY and run: node server.js
-   Make sure your frontend runs on the same origin or allow CORS.
+     # add STRIPE_SECRET_KEY and DOMAIN in a .env (never commit secrets)
+     node server.js
 ============================================================= */
 export const SERVER_SNIPPET = `
 require('dotenv').config();
@@ -475,7 +500,16 @@ app.get('/api/health', (_, res) => res.json({ ok: true }));
 
 app.post('/api/create-checkout-session', async (req, res) => {
   try {
-    const { className, dateISO, time, qty = 1, unit_amount = 1000, currency = 'gbp', email, name } = req.body;
+    const {
+      className = 'Gym class',
+      dateISO = '',
+      time = '',
+      qty = 1,
+      unit_amount = 1000,
+      currency = 'gbp',
+      email,
+      name,
+    } = req.body || {};
 
     const lineItem = {
       quantity: Math.max(1, Number(qty) || 1),
@@ -483,33 +517,32 @@ app.post('/api/create-checkout-session', async (req, res) => {
         currency,
         unit_amount: Math.max(0, Number(unit_amount) || 0),
         product_data: {
-          name: className || 'Gym class',
+          name: className,
           description: \`Session: \${dateISO} \${time}\`,
         },
       },
     };
 
-    const successUrl = (process.env.DOMAIN || 'http://localhost:5173') + '/?success=1&ref={CHECKOUT_SESSION_ID}';
-    const cancelUrl = (process.env.DOMAIN || 'http://localhost:5173') + '/?canceled=1';
-
+    const domain = process.env.DOMAIN || 'http://localhost:5173';
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
-      payment_method_types: ['card', 'link', 'klarna', 'paypal'],
+      payment_method_types: ['card', 'link'],
       customer_email: email,
       metadata: { name, className, dateISO, time },
       line_items: [lineItem],
-      success_url: successUrl,
-      cancel_url: cancelUrl,
       allow_promotion_codes: true,
+      success_url: \`\${domain}/?success=1&ref={CHECKOUT_SESSION_ID}\`,
+      cancel_url: \`\${domain}/?canceled=1\`,
     });
 
-    return res.json({ url: session.url });
+    // You can return either a URL or a sessionId. Frontend supports both.
+    return res.json({ url: session.url, id: session.id });
   } catch (err) {
-    console.error(err);
+    console.error('Stripe error:', err);
     return res.status(500).json({ error: 'Unable to create checkout session' });
   }
 });
 
 const port = process.env.PORT || 8787;
 app.listen(port, () => console.log('Stripe server on http://localhost:' + port));
-`
+`;
